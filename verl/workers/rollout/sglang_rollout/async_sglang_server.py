@@ -22,9 +22,53 @@ from pathlib import Path
 from typing import Any, Optional
 
 import ray
+import torch
+
+
+def _patch_transformers_auto_image_processor_register_for_sglang():
+    """Patch transformers compatibility before importing sglang.
+
+    Some sglang versions call AutoImageProcessor.register with the old
+    positional signature: (config, None, image_processor, None). Newer
+    transformers versions interpret the third positional argument as the fast
+    image processor class and raise ValueError.
+    """
+    try:
+        from transformers import AutoImageProcessor
+    except Exception:
+        return
+
+    original_register = AutoImageProcessor.register
+    if getattr(original_register, "_verl_sglang_compat_patched", False):
+        return
+
+    def register_compat(config_class, *args, **kwargs):
+        exist_ok = kwargs.pop("exist_ok", True)
+        try:
+            return original_register(config_class, *args, exist_ok=exist_ok, **kwargs)
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            is_sglang_old_signature = (
+                len(args) >= 3
+                and args[0] is None
+                and args[1] is not None
+                and args[2] is None
+                and (
+                    "multiple values for argument 'exist_ok'" in message
+                    or "fast_image_processor_class" in message
+                )
+            )
+            if not is_sglang_old_signature:
+                raise
+            return original_register(config_class, args[1], exist_ok=exist_ok, **kwargs)
+
+    register_compat._verl_sglang_compat_patched = True
+    AutoImageProcessor.register = register_compat
+
+
+_patch_transformers_auto_image_processor_register_for_sglang()
 import sglang
 import sglang.srt.entrypoints.engine
-import torch
 from packaging import version
 from ray.actor import ActorHandle
 from sglang.srt.entrypoints.http_server import (
@@ -141,7 +185,22 @@ class SGLangHttpServer:
             f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
             f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
         )
+        # In MUSA environments keep CUDA_VISIBLE_DEVICES and MUSA_VISIBLE_DEVICES
+        # consistent across sender workers and SGLang server processes. Tensor IPC
+        # metadata may still consult CUDA-style visibility in torch_musa stacks.
         os.environ[visible_devices_keyword] = cuda_visible_devices
+        if visible_devices_keyword == "MUSA_VISIBLE_DEVICES":
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        logger.warning(
+            "SGLang http server device binding: replica_rank=%s node_rank=%s %s=%s "
+            "MUSA_VISIBLE_DEVICES=%s CUDA_VISIBLE_DEVICES=%s",
+            replica_rank,
+            node_rank,
+            visible_devices_keyword,
+            os.environ.get(visible_devices_keyword),
+            os.environ.get("MUSA_VISIBLE_DEVICES"),
+            os.environ.get("CUDA_VISIBLE_DEVICES"),
+        )
 
         assert disaggregation_role in ("null", "prefill", "decode"), (
             f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
@@ -194,8 +253,6 @@ class SGLangHttpServer:
         self.profiler_controller = DistProfiler(self.replica_rank, config=profiler_config, tool_config=tool_config)
 
         # For multi-node, we need dist_init_addr so nodes can coordinate NCCL init.
-        # For single-node, let SGLang handle port selection internally via nccl_port,
-        # which also avoids port conflicts.
         self._master_address = None
         self._master_port = None
         self._master_sock = None
@@ -205,6 +262,20 @@ class SGLangHttpServer:
             logger.info(
                 f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
                 f"master address: {self._master_address}, port: {self._master_port}"
+            )
+
+        # Single-node SGLang uses tcp://127.0.0.1:{nccl_port} for torch.distributed.
+        # Avoid Linux ephemeral ports (typically 32768-60999). Randomly reserving
+        # an ephemeral port and releasing it before SGLang subprocesses bind can
+        # race with unrelated outgoing connections during slow graph startup.
+        self._nccl_port = None
+        self._nccl_sock = None
+        if self.nnodes == 1:
+            nccl_port_base = int(os.environ.get("VERL_SGLANG_NCCL_PORT_BASE", "62000"))
+            self._nccl_port = nccl_port_base + self.replica_rank * 100 + self.node_rank
+            logger.info(
+                f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
+                f"node_rank: {self.node_rank}, using static nccl_port: {self._nccl_port}"
             )
 
     def get_master_address(self):
@@ -270,6 +341,10 @@ class SGLangHttpServer:
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        max_running_requests = self.config.get("max_num_seqs", None)
+        if max_running_requests is not None and max_running_requests <= 0:
+            max_running_requests = None
+
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
@@ -285,7 +360,7 @@ class SGLangHttpServer:
             "load_format": self.config.load_format,
             "nnodes": self.nnodes,
             "trust_remote_code": self.model_config.trust_remote_code,
-            "max_running_requests": self.config.get("max_num_seqs", None),
+            "max_running_requests": max_running_requests,
             "log_level": "error",
             "mm_attention_backend": "fa3",
             "attention_backend": attention_backend if attention_backend is not None else "fa3",
@@ -307,9 +382,9 @@ class SGLangHttpServer:
                     "lora_target_modules": self.model_config.target_modules,
                 }
             )
-        # Only set dist_init_addr for multi-node; for single-node, let SGLang
-        # handle port selection internally via nccl_port to avoid conflicts.
-        if self.nnodes > 1:
+        if self.nnodes == 1 and self._nccl_port is not None:
+            args["nccl_port"] = self._nccl_port
+        elif self.nnodes > 1:
             dist_init_addr = (
                 f"[{self._master_address}]:{self._master_port}"
                 if is_valid_ipv6_address(self._master_address)
@@ -372,6 +447,13 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
+        if self._nccl_sock is not None:
+            self._nccl_sock.close()
+            self._nccl_sock = None
+            logger.info(
+                f"SGLangHttpServer, replica_rank: {self.replica_rank}, "
+                f"node_rank: {self.node_rank}, released nccl_port: {self._nccl_port}"
+            )
         # For SGLang main branch or version >= 0.5.10
         # The latest main branch of SGLang has wrapped the _launch_subprocesses function inside the Engine class
         if version.parse(sglang.__version__) >= version.parse("0.5.10"):

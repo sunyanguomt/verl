@@ -38,7 +38,12 @@ from verl.utils.flops_counter import FlopsCounter
 from verl.utils.import_utils import import_external_libs
 from verl.utils.memory_utils import aggressive_empty_cache
 from verl.utils.metric.utils import Metric
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage
+from verl.utils.profiler import (
+    DistProfiler,
+    DistProfilerExtension,
+    ProfilerConfig,
+    log_gpu_memory_usage,
+)
 from verl.utils.py_functional import append_to_dict
 from verl.utils.tensordict_utils import maybe_fix_3d_position_ids
 from verl.utils.torch_functional import allgather_dict_into_dict
@@ -659,6 +664,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.actor.save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    @DistProfiler.annotate(color="red", role="update_weights")
     async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
 

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 from contextlib import contextmanager
 from typing import Callable, Optional
 
@@ -161,6 +162,25 @@ class NsightSystemsProfiler(DistProfiler):
         """
 
         def decorator(func):
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs_inner):
+                    profile_name = message or func.__name__
+
+                    if self.discrete:
+                        torch.cuda.profiler.start()
+                    mark_range = mark_start_range(message=profile_name, color=color, domain=domain, category=category)
+
+                    try:
+                        return await func(*args, **kwargs_inner)
+                    finally:
+                        mark_end_range(mark_range)
+                        if self.discrete:
+                            torch.cuda.profiler.stop()
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
                 profile_name = message or func.__name__
@@ -169,13 +189,12 @@ class NsightSystemsProfiler(DistProfiler):
                     torch.cuda.profiler.start()
                 mark_range = mark_start_range(message=profile_name, color=color, domain=domain, category=category)
 
-                result = func(*args, **kwargs_inner)
-
-                mark_end_range(mark_range)
-                if self.discrete:
-                    torch.cuda.profiler.stop()
-
-                return result
+                try:
+                    return func(*args, **kwargs_inner)
+                finally:
+                    mark_end_range(mark_range)
+                    if self.discrete:
+                        torch.cuda.profiler.stop()
 
             return wrapper
 

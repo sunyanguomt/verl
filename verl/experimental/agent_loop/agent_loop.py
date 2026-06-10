@@ -440,7 +440,15 @@ class AgentLoopWorker:
             top_k=config.top_k,
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
+            ignore_eos=config.ignore_eos,
         )
+        tokenizer_eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        if tokenizer_eos_token_id is not None:
+            if isinstance(tokenizer_eos_token_id, list):
+                stop_token_ids = tokenizer_eos_token_id
+            else:
+                stop_token_ids = [tokenizer_eos_token_id]
+            sampling_params["stop_token_ids"] = list(dict.fromkeys(stop_token_ids))
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params["top_p"] = 1.0

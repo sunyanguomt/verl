@@ -25,10 +25,14 @@ import ray
 from verl.utils.device import (
     get_torch_device,
     get_visible_devices_keyword,
+    is_musa_available,
     is_npu_available,
 )
 
 from .decorator import Dispatch, Execute, register
+import logging
+logger = logging.getLogger(__name__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 @dataclass
@@ -201,6 +205,19 @@ class Worker(WorkerHelper):
 
         local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        visible_devices = os.environ.get(get_visible_devices_keyword().upper(), "")
+        visible_device_count = len([dev for dev in visible_devices.split(",") if dev.strip()]) if visible_devices else 0
+        # In Ray environments LOCAL_RANK/LOCAL_WORLD_SIZE may be left as 0/1 for every worker,
+        # especially on non-CUDA backends such as MUSA. Fall back to rank modulo visible device
+        # count so each worker binds to a different local device.
+        inferred_local_world_size = local_world_size if local_world_size > 1 else visible_device_count
+        effective_local_rank = rank % inferred_local_world_size if inferred_local_world_size > 1 else local_rank
+        if local_rank != effective_local_rank:
+            os.environ["LOCAL_RANK"] = str(effective_local_rank)
+            local_rank = effective_local_rank
+        if local_world_size != inferred_local_world_size and inferred_local_world_size > 1:
+            os.environ["LOCAL_WORLD_SIZE"] = str(inferred_local_world_size)
+            local_world_size = inferred_local_world_size
 
         store = {
             "_world_size": world_size,
@@ -218,6 +235,60 @@ class Worker(WorkerHelper):
         self.fused_worker_dict = {}
         self.__dispatch_dp_rank = {}
         self.__collect_dp_rank = {}
+
+        get_torch_device().set_device(local_rank)
+        # Some MUSA compatibility layers route torch.cuda APIs to torch.musa APIs, while some
+        # call sites still use torch.cuda.current_device(). Set both namespaces when possible.
+        try:
+            import torch
+
+            if hasattr(torch, "cuda") and hasattr(torch.cuda, "set_device"):
+                torch.cuda.set_device(local_rank)
+        except Exception as exc:
+            logger.warning("torch.cuda.set_device(%s) skipped: %s", local_rank, exc)
+        try:
+            import torch
+
+            cuda_current_device = torch.cuda.current_device() if hasattr(torch, "cuda") else None
+        except Exception as exc:
+            cuda_current_device = f"unavailable: {type(exc).__name__}: {exc}"
+        logger.warning(
+            "Worker device binding: rank=%s local_world_size=%s local_rank=%s current_device=%s cuda_current_device=%s visible_devices=%s",
+            rank,
+            local_world_size,
+            local_rank,
+            get_torch_device().current_device(),
+            cuda_current_device,
+            os.environ.get(get_visible_devices_keyword().upper()),
+        )
+
+        def apply_global_patch():
+            import os
+            import sys
+            if os.getenv("ACCELERATOR_BACKEND", "musa") == "musa" and os.getenv('MUSA_PATCH_PATH','') != '':
+                musa_patch_path = os.getenv('MUSA_PATCH_PATH','')
+                sys.path.append(musa_patch_path)
+                import musa_patch
+                print(f"musa_patch_path: {musa_patch_path}")
+                print('\n import musa patch success!\n')
+            else:
+                print('\n skip musa patch \n')
+            
+        apply_global_patch()
+
+        def set_random_seed(seed):
+            import torch
+            import random
+            import numpy as np
+            from transformers import set_seed
+            if seed is not None:
+                set_seed(seed)
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                torch.musa.manual_seed_all(seed)
+                print(f'setting random seed {seed}')
+        set_random_seed(0)
 
     def get_fused_worker_by_name(self, worker_name: str):
         """Get a fused worker by its name.
@@ -237,6 +308,8 @@ class Worker(WorkerHelper):
         rocr_val = os.environ.get("ROCR_VISIBLE_DEVICES", None)
         hip_val = os.environ.get("HIP_VISIBLE_DEVICES", None)
         cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        logger.warning(f"cuda_val={cuda_val}, CUDA_VISIBLE_DEVICES={cuda_val}")
+        logger.warning(f"rocr_val: {rocr_val}, hip_val: {hip_val}, is_ray_noset_visible_devices: {is_ray_noset_visible_devices}") # DEBUG
         if hip_val:
             # Switch the use of HIP_VISIBLE_DEVICES to CUDA_VISIBLE_DEVICES for consistency.
             # Make sure that the HIP_VISIBLE_DEVICES is set to the same value as CUDA_VISIBLE_DEVICES
@@ -270,7 +343,10 @@ class Worker(WorkerHelper):
             os.environ["CUDA_VISIBLE_DEVICES"] = cuda_val
             rocr_val = None
 
-        if is_ray_noset_visible_devices:
+        # Keep behavior aligned with /home/verl: always bind the worker to
+        # Ray assigned accelerator id. This is important for MUSA because Ray
+        # may expose CUDA_VISIBLE_DEVICES while torch_musa uses MUSA devices.
+        if True:  # is_ray_noset_visible_devices
             # NOTE: Ray will automatically set the *_VISIBLE_DEVICES
             # environment variable for each actor, unless
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set,
@@ -279,6 +355,21 @@ class Worker(WorkerHelper):
             local_rank = ray.get_runtime_context().get_accelerator_ids()[device_name][0]
             os.environ["LOCAL_RANK"] = local_rank
             get_torch_device().set_device(int(local_rank))
+            logger.warning(f"LOCAL_RANK: {local_rank} set device")
+
+        # In MUSA environments Ray may leave CUDA_VISIBLE_DEVICES as a single
+        # per-actor id while MUSA_VISIBLE_DEVICES is the full visible set. Keep
+        # them consistent before tensor IPC weight sync to avoid CUDA/MUSA
+        # coordinate-system mismatches between sender workers and SGLang server.
+        if is_musa_available and os.environ.get("MUSA_VISIBLE_DEVICES"):
+            os.environ["CUDA_VISIBLE_DEVICES"] = os.environ["MUSA_VISIBLE_DEVICES"]
+            logger.warning(
+                "Align CUDA_VISIBLE_DEVICES to MUSA_VISIBLE_DEVICES for MUSA IPC: %s",
+                os.environ.get("CUDA_VISIBLE_DEVICES"),
+            )
+
+        logger.warning(f"MUSA_VISIBLE_DEVICES after Ray setup: {os.environ.get('MUSA_VISIBLE_DEVICES')}")
+        logger.warning(f"CUDA_VISIBLE_DEVICES after Ray setup: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
     def _configure_with_store(self, store: dict):
         """

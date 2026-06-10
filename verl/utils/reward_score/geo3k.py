@@ -13,7 +13,24 @@
 # limitations under the License.
 import re
 
-from mathruler.grader import extract_boxed_content, grade_answer
+try:
+    from mathruler.grader import extract_boxed_content, grade_answer
+except ModuleNotFoundError:
+    from verl.utils.reward_score.deepscaler_math.utils.utils import (
+        extract_answer,
+        grade_answer_mathd,
+        grade_answer_sympy,
+    )
+
+    def extract_boxed_content(predict_str: str):
+        return extract_answer(predict_str)
+
+    def grade_answer(answer: str, ground_truth: str) -> bool:
+        if answer is None:
+            return False
+        answer = str(answer)
+        ground_truth = str(ground_truth)
+        return grade_answer_mathd(answer, ground_truth) or grade_answer_sympy(answer, ground_truth)
 
 
 def format_reward(predict_str: str) -> float:

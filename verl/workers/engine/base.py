@@ -286,7 +286,8 @@ class EngineRegistry:
             model_type (str): The type of the model
             backend (list[str] | str): The backend to use for the model type
             device (list[str] | str): The device type (e.g., "cuda", "npu", "cpu") this engine supports,
-                default is "cuda"
+                default is "cuda". In a MUSA environment, default CUDA engine registrations are also registered
+                for "musa" to allow CUDA-compatible backends to be selected without editing every caller.
 
         Returns:
             A decorator function that takes an engine class and registers it.
@@ -298,7 +299,9 @@ class EngineRegistry:
                 cls._engines[model_type] = {}
 
             backends = backend if isinstance(backend, list) else [backend]
-            devices = device if isinstance(device, list) else [device]
+            devices = list(device) if isinstance(device, list) else [device]
+            if get_device_name() == "musa" and "cuda" in devices and "musa" not in devices:
+                devices.append("musa")
             for current_backend in backends:
                 for current_device in devices:
                     if current_backend not in cls._engines[model_type]:

@@ -322,7 +322,7 @@ class RLHFDataset(Dataset):
         Returns:
             messages: List of messages with replaced placeholder.
         """
-        messages: list = example[key]
+        messages: list = [dict(message) for message in example[key]]
         # When concatenating image and video datasets, get will return None for image or video sample
         images = example.get(self.image_key, None) or []
         videos = example.get(self.video_key, None) or []
@@ -348,8 +348,10 @@ class RLHFDataset(Dataset):
                         image = image.convert("RGB")
                         content_list.append({"type": "image", "image": image})
                     elif isinstance(image, dict):
+                        image = {key: value for key, value in dict(image).items() if value is not None}
                         if "bytes" in image:
-                            image["image"] = Image.open(BytesIO(image["bytes"]))
+                            image.setdefault("image", Image.open(BytesIO(image["bytes"])))
+                            image.pop("bytes", None)
                         content_list.append({"type": "image", **image})
                     else:
                         raise TypeError(f"image must be dict or PIL.Image, unsupported image type: {type(image)}")

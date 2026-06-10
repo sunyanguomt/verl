@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 import os
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -21,6 +22,15 @@ import torch
 
 from .config import ProfilerConfig, TorchProfilerToolConfig
 from .profile import DistProfiler
+
+
+def _get_device_profiler_activity():
+    # Keep "cuda" in profiler configs as the generic device activity on MUSA runs.
+    if os.getenv("ACCELERATOR_BACKEND", "").lower() == "musa":
+        musa_activity = getattr(torch.profiler.ProfilerActivity, "MUSA", None)
+        if musa_activity is not None:
+            return musa_activity
+    return torch.profiler.ProfilerActivity.CUDA
 
 
 def get_torch_profiler(
@@ -53,7 +63,7 @@ def get_torch_profiler(
     if not contents or "cpu" in contents:
         activities.append(torch.profiler.ProfilerActivity.CPU)
     if not contents or "cuda" in contents:
-        activities.append(torch.profiler.ProfilerActivity.CUDA)
+        activities.append(_get_device_profiler_activity())
 
     return torch.profiler.profile(
         activities=activities,
@@ -146,6 +156,34 @@ class Profiler(DistProfiler):
         """
 
         def decorator(func):
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs_inner):
+                    profile_name = message or func.__name__
+
+                    if not self.discrete:
+                        # In continuous mode, we just record function, profiler started globally
+                        with torch.profiler.record_function(profile_name):
+                            return await func(*args, **kwargs_inner)
+
+                    # In discrete mode, we start/stop profiler around the function
+                    prof = get_torch_profiler(
+                        contents=self.contents,
+                        save_path=self.save_path,
+                        role=role,
+                        save_file_prefix=self.save_file_prefix,
+                        rank=self.rank,
+                    )
+                    prof.start()
+                    try:
+                        with torch.profiler.record_function(profile_name):
+                            return await func(*args, **kwargs_inner)
+                    finally:
+                        prof.stop()
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
                 profile_name = message or func.__name__
@@ -164,10 +202,11 @@ class Profiler(DistProfiler):
                     rank=self.rank,
                 )
                 prof.start()
-                with torch.profiler.record_function(profile_name):
-                    result = func(*args, **kwargs_inner)
-                prof.stop()
-                return result
+                try:
+                    with torch.profiler.record_function(profile_name):
+                        return func(*args, **kwargs_inner)
+                finally:
+                    prof.stop()
 
             return wrapper
 

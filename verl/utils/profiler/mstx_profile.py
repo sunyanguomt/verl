@@ -14,6 +14,7 @@
 
 # Inspired from https://gitee.com/ascend/MindSpeed-RL/blob/master/mindspeed_rl/utils/utils.py
 import functools
+import inspect
 import logging
 import os
 from contextlib import contextmanager
@@ -218,10 +219,42 @@ class NPUProfiler(DistProfiler):
         """
 
         def decorator(func):
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs_inner):
+                    profile_name = message or func.__name__
+                    discrete_mode = self.discrete
+                    profile_npu = None
+
+                    if not discrete_mode:
+                        mark_range = mark_start_range(message=profile_name)
+                    else:
+                        profile_npu = get_npu_profiler(
+                            contents=self.profile_contents,
+                            profile_level=self.profile_level,
+                            profile_save_path=self.profile_save_path,
+                            analysis=self.analysis,
+                            role=role,
+                        )
+                        profile_npu.start()
+                        mark_range = mark_start_range(message=profile_name)
+
+                    try:
+                        return await func(*args, **kwargs_inner)
+                    finally:
+                        mark_end_range(mark_range)
+                        if discrete_mode:
+                            profile_npu.step()
+                            profile_npu.stop()
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(*args, **kwargs_inner):
                 profile_name = message or func.__name__
                 discrete_mode = self.discrete
+                profile_npu = None
 
                 if not discrete_mode:
                     mark_range = mark_start_range(message=profile_name)
@@ -236,16 +269,13 @@ class NPUProfiler(DistProfiler):
                     profile_npu.start()
                     mark_range = mark_start_range(message=profile_name)
 
-                result = func(*args, **kwargs_inner)
-
-                if not discrete_mode:
+                try:
+                    return func(*args, **kwargs_inner)
+                finally:
                     mark_end_range(mark_range)
-                else:
-                    mark_end_range(mark_range)
-                    profile_npu.step()
-                    profile_npu.stop()
-
-                return result
+                    if discrete_mode:
+                        profile_npu.step()
+                        profile_npu.stop()
 
             return wrapper
 

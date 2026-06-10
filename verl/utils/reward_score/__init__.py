@@ -16,6 +16,20 @@
 from verl.utils.import_utils import deprecated
 
 
+DEEPSCALER_MATH_DATA_SOURCES = {
+    "20250416_amc_aime_website",
+    "20250418_latex_artofproblem",
+    "BigMathVerified",
+    "IMO_1959-2024",
+    "MetaMathQA",
+    "NuminaMath",
+    "aime",
+    "am_synthetic",
+    "data_ablation_full59K",
+    "openR1Math_extended",
+}
+
+
 def default_compute_score(
     data_source,
     solution_str,
@@ -41,7 +55,11 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
-    if data_source == "openai/gsm8k":
+    if data_source is None or data_source in DEEPSCALER_MATH_DATA_SOURCES:
+        from verl.utils.reward_score.deepscaler_math.math_reward import deepscaler_reward_fn
+
+        res = deepscaler_reward_fn(solution_str, ground_truth)
+    elif data_source == "openai/gsm8k":
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)

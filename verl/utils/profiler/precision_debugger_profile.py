@@ -62,7 +62,7 @@ _MODEL_ATTRS_BY_ROLE = {
     ),
 }
 
-_SKIP_STAGES = {"rollout_generate"}
+_SKIP_STAGES = {"rollout_generate", "update_weights"}
 
 
 class PrecisionDebuggerProfiler:

@@ -367,6 +367,9 @@ profiler:
   # The ranks that will be profiled. [] or [0,1,...]
   ranks: ${oc.select:actor_rollout_ref.actor.profiler.ranks,[]}
 
+  # The annotated roles that will be profiled. null or ["all"] means all roles.
+  roles: ${oc.select:actor_rollout_ref.actor.profiler.roles,null}
+
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 

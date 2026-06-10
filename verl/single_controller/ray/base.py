@@ -127,9 +127,11 @@ class RayResourcePool(ResourcePool):
         self.detached = detached
         self.accelerator_type = accelerator_type
 
-    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name="cuda"):
+    def get_placement_groups(self, strategy="STRICT_PACK", name=None, device_name=None):
         if self.pgs is not None:
             return self.pgs
+        if device_name is None:
+            device_name = get_device_name()
 
         pg_name_prefix = (
             name if name else f"{self.name_prefix}verl_group_{'_'.join([str(count) for count in self._store])}:"
@@ -138,6 +140,8 @@ class RayResourcePool(ResourcePool):
         if device_name == "npu":
             device_name = "NPU"
         elif device_name == "cuda":
+            device_name = "GPU"
+        elif device_name == "musa":
             device_name = "GPU"
 
         bundle = {"CPU": self.max_colocate_count}
@@ -370,7 +374,7 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         use_gpu: bool = True,
         num_gpus=1,
         sharing_with=None,
-        device_name="cuda",
+        device_name=None,
     ) -> Any:
         """Create and return a Ray actor with the configured options.
 
@@ -385,6 +389,9 @@ class RayClassWithInitArgs(ClassWithInitArgs):
         Returns:
             A Ray actor handle with the configured options
         """
+        if device_name is None:
+            device_name = get_device_name()
+
         if sharing_with is not None:
             target_node_id = ray.get(sharing_with.get_node_id.remote())
             visible_devices = ray.get(sharing_with.get_cuda_visible_devices.remote())
@@ -402,6 +409,8 @@ class RayClassWithInitArgs(ClassWithInitArgs):
             options["num_gpus"] = num_gpus
         if use_gpu and device_name == "npu":
             options["resources"] = {"NPU": num_gpus}
+        if use_gpu and device_name == "musa":
+            options["num_gpus"] = num_gpus
 
         if len(self._additional_resource) > 1:
             for k, v in self._additional_resource.items():
@@ -458,7 +467,7 @@ class RayWorkerGroup(WorkerGroup):
         # if a WorkerGroup is spawned from Colocate WorkerGroup, this indicates which sub-class is binded to
         # this WorkerGroup.
         self.sub_cls_name = ""
-        self.device_name = kwargs.get("device_name", "cuda")
+        self.device_name = kwargs.get("device_name", get_device_name())
         self.profile_steps = kwargs.get("profile_steps", None)
         self.worker_nsight_options = kwargs.get("worker_nsight_options", None)
         self.customized_worker_env = kwargs.get("worker_env", {})

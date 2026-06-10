@@ -151,6 +151,7 @@ class ProfilerConfig(BaseConfig):
     enable: bool = False
     all_ranks: bool = False
     ranks: list[int] = field(default_factory=list)
+    roles: Optional[list[str]] = None
     save_path: Optional[str] = MISSING
     tool_config: Any = MISSING  # Just a placeholder, will use configs above directly
     global_tool_config: Optional[Any] = None  # Global tool configuration for all profiling tools
@@ -162,6 +163,7 @@ class ProfilerConfig(BaseConfig):
             enable=self.enable or other.enable,
             all_ranks=self.all_ranks or other.all_ranks,
             ranks=list(set(self.ranks or []) | set(other.ranks or [])),
+            roles=None if self.roles is None or other.roles is None else list(set(self.roles) | set(other.roles)),
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config or other.global_tool_config,
@@ -176,6 +178,13 @@ class ProfilerConfig(BaseConfig):
             enable=self.enable and other.enable,
             all_ranks=self.all_ranks and other.all_ranks,
             ranks=list(set(self.ranks or []) & set(other.ranks or [])),
+            roles=(
+                other.roles
+                if self.roles is None
+                else self.roles
+                if other.roles is None
+                else list(set(self.roles) & set(other.roles))
+            ),
             save_path=self.save_path,
             tool_config=self.tool_config,
             global_tool_config=self.global_tool_config if self.global_tool_config else other.global_tool_config,
@@ -186,6 +195,10 @@ class ProfilerConfig(BaseConfig):
         assert isinstance(self.ranks, set | list | tuple), (
             f"Profiler ranks must be of type list, got {type(self.ranks)}"
         )
+        if self.roles is not None:
+            assert isinstance(self.roles, set | list | tuple), (
+                f"Profiler roles must be of type list[str], got {type(self.roles)}"
+            )
 
 
 def build_vllm_profiler_args(profiler_config: ProfilerConfig, tool_config: BaseConfig, rank: int) -> dict:

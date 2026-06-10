@@ -18,6 +18,7 @@ import logging
 import os
 import random
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict
 
 import megatron.core
@@ -53,6 +54,34 @@ if not mcore_ge_014:
         "Detected megatron.core %s, recommend upgrading to >= 0.14.0 for better checkpoint compatibility",
         megatron.core.__version__,
     )
+
+
+@contextmanager
+def _use_original_torch_tensor_reductions_for_checkpoint():
+    """Avoid SGLang's tensor-reduction patch while Megatron forks checkpoint writers."""
+    try:
+        from torch.multiprocessing import reductions
+    except Exception:
+        yield
+        return
+
+    original_reduce_tensor = getattr(reductions, "_reduce_tensor_original", None)
+    original_rebuild_cuda_tensor = getattr(reductions, "_rebuild_cuda_tensor_original", None)
+    if original_reduce_tensor is None or original_rebuild_cuda_tensor is None:
+        yield
+        return
+
+    patched_reduce_tensor = reductions.reduce_tensor
+    patched_rebuild_cuda_tensor = reductions.rebuild_cuda_tensor
+    reductions.reduce_tensor = original_reduce_tensor
+    reductions.rebuild_cuda_tensor = original_rebuild_cuda_tensor
+    reductions.init_reductions()
+    try:
+        yield
+    finally:
+        reductions.reduce_tensor = patched_reduce_tensor
+        reductions.rebuild_cuda_tensor = patched_rebuild_cuda_tensor
+        reductions.init_reductions()
 
 
 class MegatronCheckpointManager(BaseCheckpointManager):
@@ -640,7 +669,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # Note that model weights, optimizer states, and extra states are generated
         # together in a state dict, we save them in one time
         if self.use_megatron_fsdp:
-            async_save_request = self._save_megatron_fsdp_checkpoint(dist_checkpoint_path)
+            with _use_original_torch_tensor_reductions_for_checkpoint():
+                async_save_request = self._save_megatron_fsdp_checkpoint(dist_checkpoint_path)
         elif self.use_dist_checkpointing:
             # Generate state dict for saving
             sharded_sd_metadata = self._build_sharded_state_dict_metadata()
@@ -664,12 +694,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                         logger=logger,
                     )
             # Start Async save if enabled
-            async_save_request = save_dist_checkpointing(
-                sharded_state_dict=state_dict,
-                ckpt_path=dist_checkpoint_path,
-                async_save=self.checkpoint_config.async_save,
-                content_metadata=sharded_sd_metadata,
-            )
+            with _use_original_torch_tensor_reductions_for_checkpoint():
+                async_save_request = save_dist_checkpointing(
+                    sharded_state_dict=state_dict,
+                    ckpt_path=dist_checkpoint_path,
+                    async_save=self.checkpoint_config.async_save,
+                    content_metadata=sharded_sd_metadata,
+                )
 
             # Synchronize all async save requests
             if not self.checkpoint_config.async_save:
@@ -688,12 +719,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             state_dict = self._maybe_filter_peft_state_dict(state_dict)
             # Save optimizer and extra states to local path
             # Start Async save if enabled
-            async_save_request = save_dist_checkpointing(
-                sharded_state_dict=state_dict,
-                ckpt_path=dist_checkpoint_path,
-                async_save=self.checkpoint_config.async_save,
-                content_metadata=sharded_sd_metadata,
-            )
+            with _use_original_torch_tensor_reductions_for_checkpoint():
+                async_save_request = save_dist_checkpointing(
+                    sharded_state_dict=state_dict,
+                    ckpt_path=dist_checkpoint_path,
+                    async_save=self.checkpoint_config.async_save,
+                    content_metadata=sharded_sd_metadata,
+                )
 
             # Synchronize all async save requests
             if not self.checkpoint_config.async_save:

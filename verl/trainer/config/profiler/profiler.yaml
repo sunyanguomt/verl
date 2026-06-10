@@ -14,6 +14,9 @@ all_ranks: False
 # The ranks that will be profiled. [] or [0,1,...]
 ranks: []
 
+# The annotated roles that will be profiled. null or ["all"] means all roles.
+roles: null
+
 # profile results saving path
 save_path: "outputs/profile"
 

@@ -72,6 +72,29 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _is_mtp_weight_name(name: str) -> bool:
+    return name.startswith("mtp.") or ".mtp." in name or ".mtp_layers." in name
+
+
+def _filter_frozen_mtp_weights(
+    weights: Iterator[tuple[str, torch.Tensor]],
+) -> Iterator[tuple[str, torch.Tensor]]:
+    skipped_count = 0
+    skipped_bytes = 0
+    for name, tensor in weights:
+        if _is_mtp_weight_name(name):
+            skipped_count += 1
+            skipped_bytes += tensor.numel() * tensor.element_size()
+            continue
+        yield name, tensor
+    if skipped_count:
+        logger.info(
+            "Skipped %s frozen MTP weights during update_weights export (%.2f GiB)",
+            skipped_count,
+            skipped_bytes / (1024**3),
+        )
+
+
 class MegatronEngine(BaseEngine):
     def __init__(
         self,
@@ -175,6 +198,9 @@ class MegatronEngine(BaseEngine):
             from verl.models.mcore.mbridge import AutoBridge
 
             bridge = AutoBridge.from_config(self.model_config.hf_config, dtype=self.param_dtype)
+            export_buffer_mb = int(os.getenv("MBRIDGE_EXPORT_WEIGHTS_BUFFER_MB", "64"))
+            bridge.export_weights_buffer_max_size_bytes = export_buffer_mb * 1024 * 1024
+            logger.info("mbridge export_weights_buffer_max_size_bytes=%s MB", export_buffer_mb)
             if self.engine_config.dynamic_context_parallel:
                 override_transformer_config["max_seqlen_per_dp_cp_rank"] = self.engine_config.max_seqlen_per_dp_cp_rank
                 # note(baiyan): we must set the transformer_config.dynamic_context_parallel to False
@@ -740,6 +766,9 @@ class MegatronEngine(BaseEngine):
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
+
+        if self.model_config.mtp.enable and not self.model_config.mtp.enable_train:
+            per_tensor_param = _filter_frozen_mtp_weights(per_tensor_param)
 
         return per_tensor_param, peft_config
 

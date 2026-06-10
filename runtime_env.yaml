@@ -1,0 +1,90 @@
+working_dir: ./
+excludes: ["/.git/","/run_cmd/", "output","outputs","*.log",".log",".safetensors", "*.pkl"]
+env_vars:
+  PYTORCH_MUSA_ALLOC_CONF: "expandable_segments:True" # 缓解内存碎片
+  TORCH_MCCL_AVOID_RECORD_STREAMS: "1"
+  # USE_ZERO2ONE_REWARD: "1"
+  SGLANG_SET_CPU_AFFINITY: "1"
+  SGL_USE_DEEPGEMM_BMM: "0"
+  SGLANG_USE_MUSA_FUSED_KERNEL: "0"
+  # SGLANG_DEEPEP_BF16_DISPATCH: "1"
+  # SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK: "1024"
+  SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK: "1"
+  MUSA_LOG: "0x1" # 0x3 便于查看 MUSA API 报错,  但会有大量的输出
+  ENABLE_PROFILER: "1"  # 使用musa_patch 中的profiler
+  VLLM_PATCH_MUSA_CUSTOM_OPS: "1"
+  VLLM_CONFIGURE_LOGGING: "0"
+  # ====== MUSA log ======
+  # MUSA_LOG: "0xf"
+  # ====== xpu debug ======
+  # MCCL_LIB: "/usr/local/musa/lib/libmccl.so"
+  # LOCAL_WORLD_SIZE: "2" # 8
+  #XPU_TIMER_TIMELINE_PATH: "/home/verl/run_cmd/xputimer_debug"
+  # XPU_TIMER_HANG_TIMEOUT: "240" # Hang检测超时设置小于kernel execution timeout （单位：秒？）
+  #XPU_TIMER_HANG_TIMEOUT: "60"
+  #XPU_TIMER_PORT: "18889"
+  # ======
+  MUSA_ERROR_DUMP_VERBOSE: "0" # 用于 musa dump 调试
+  # MCCL_DEBUG: "INFO"       # 启用MCCL的详细信息输出
+  # MCCL_DEBUG_SUBSYS: "ALL" # 输出所有子系统的日志（可选，信息量巨大）
+  # PYTHONVERBOSE: "1"       # 让Python输出更多解释器相关信息
+  # ====== 输出详细进程信息DEBUG ====== 单卡的时候添加这部分信息报错
+  # TORCH_DISTRIBUTED_DEBUG: "DETAIL"
+  # TORCH_CPP_LOG_LEVEL: "INFO"
+  # MCCL_DEBUG: "INFO" # MCCL 调试信息输出
+  # MCCL_P2P_DISABLE: "1" # 临时禁用点对点通信
+  MUSA_LAUNCH_BLOCKING: "0" # "0" 设置为 1 会影响性能
+  # MUSA_EXECUTION_TIMEOUT: "60000" # 单位：毫秒 60秒
+  MUSA_EXECUTION_TIMEOUT: "900000" # 单位：毫秒 600秒
+  GLOO_SOCKET_TIMEOUT: "3600"
+  # ==================
+  # ====== 强制同步操作 ======
+  # MCCL_ASYNC: "0"
+  # MCCL_FORCE_SYNC: "1"
+  # MCCL_ASYNC_ENABLE: "0" # 禁用异步操作
+  # ==================
+  # MCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_MCCL_ASYNC_ERROR_HANDLING: "1"
+  # =========
+  TOKENIZERS_PARALLELISM: "false" # DEBUG tokenizer并行化设置
+  # TORCH_NCCL_BLOCKING_WAIT: "1" # DEBUG
+  TORCH_MCCL_BLOCKING_WAIT: "1" # 0 异步等待
+  # NCCL_TIMEOUT: "600000"  # DEBUG 单位：毫秒（600000ms = 10分钟）
+  MCCL_TIMEOUT: "6000000"
+  RAY_BACKEND_LOG_LEVEL: "debug" # DEBUG
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
+  MUSA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  # MUSA_VISIBLE_DEVICES: "0,1"
+  CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  ACCELERATOR_BACKEND: "musa"
+  MCCL_PROTOS: "2"
+  MCCL_CHECK_POINTERS: "0"
+  VERL_LOGGING_LEVEL: "INFO"
+  HYDRA_FULL_ERROR: "1"
+  MUSA_PATCH_PATH: "/home/megatron-lm-musa-patch/"
+  MEGATRON_PATH: "/home/Megatron-LM"
+  VERL_PATH: "/home/verl"
+  PYTHONPATH: "$MEGATRON_PATH:$VERL_PATH:$PYTHONPATH"
+  VLLM_USE_V1: "0"
+  ACCELERATE_USE_FSDP: "1"
+  FSDP_CPU_RAM_EFFICIENT_LOADING: "1"
+  LD_LIBRARY_PATH: "/usr/local/musa/lib:$LD_LIBRARY_PATH"
+  MCCL_SOCKET_IFNAME: "bond0" # 添加
+  GLOO_SOCKET_IFNAME: "bond0"
+  # RAY_DEBUG_POST_MORTEM: "1"
+  MCCL_IB_HCA: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1"
+  # MCCL_IB_HCA: "mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5" 
+  MCCL_ALGOS: "1" #  unset后 MCCL 自己决定以哪种传输算法在卡间传输数据， 1-ring
+  MCCL_IB_GID_INDEX: "3"
+  MCCL_BUFFSIZE: "20971520" # 20M 注释掉则自行赋值
+  MUSA_BLOCK_SCHEDULE_MODE: "1" # 1是阻塞调度，考虑修改为 0
+  MUSA_BLOCK_DISTRIBUTION_GRANULARITY: "0"
+  MCCL_MAX_NCHANNELS: "32" # unset后MCCL自己决定使用的 MUSA 通信通道的最大数量
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  TORCH_NUM_THREADS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+
+  PYTORCH_MUSA_ALLOC_CONF: "expandable_segments:True"

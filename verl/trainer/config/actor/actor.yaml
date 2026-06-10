@@ -185,6 +185,9 @@ profiler:
   # The ranks that will be profiled. [] or [0,1,...]
   ranks: []
 
+  # The annotated roles that will be profiled. null or ["all"] means all roles.
+  roles: null
+
   # profile results saving path
   save_path: ${oc.select:global_profiler.save_path,null}
 
@@ -314,4 +317,3 @@ qat:
 
   # Path to vLLM quantization config JSON file
   quantization_config_path: null
-

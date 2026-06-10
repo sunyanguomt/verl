@@ -25,9 +25,12 @@ def process_image(image: dict | Image.Image, image_patch_size: int = 14) -> Imag
     if isinstance(image, Image.Image):
         return image.convert("RGB")
 
+    # Do not mutate dataset rows in-place. The same image dict can be reused
+    # while filtering prompts and building raw prompts.
+    image = {key: value for key, value in dict(image).items() if value is not None}
     if "bytes" in image:
-        assert "image" not in image, "Cannot have both `bytes` and `image`"
-        image["image"] = Image.open(BytesIO(image["bytes"]))
+        image.setdefault("image", Image.open(BytesIO(image["bytes"])))
+        image.pop("bytes", None)
 
     try:
         ans = fetch_image(image, image_patch_size=image_patch_size)

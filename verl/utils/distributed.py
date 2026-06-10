@@ -14,6 +14,7 @@
 """Utilities for distributed training."""
 
 import ctypes
+import logging
 import os
 import socket
 from datetime import timedelta
@@ -23,6 +24,7 @@ import torch.distributed
 
 from verl.utils.device import get_device_name, get_nccl_backend, get_torch_device, is_npu_available
 from verl.utils.net_utils import is_ipv6
+logger = logging.getLogger(__name__)
 
 
 def set_numa_affinity():
@@ -84,6 +86,7 @@ def initialize_global_process_group_ray(timeout_second=None, backend=None):
 
     timeout = timedelta(seconds=timeout_second) if timeout_second is not None else None
     backend = backend or f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+    logger.debug("Initializing process group with backend %s", backend)
     if not torch.distributed.is_initialized():
         rank = int(os.environ.get("RANK", 0))
         world_size = int(os.environ.get("WORLD_SIZE", 1))

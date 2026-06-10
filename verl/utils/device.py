@@ -44,6 +44,7 @@ def is_torch_npu_available(check_device=True) -> bool:
 
 
 is_cuda_available = torch.cuda.is_available()
+is_musa_available = torch.musa.is_available()
 is_npu_available = is_torch_npu_available()
 
 
@@ -52,32 +53,46 @@ def get_resource_name() -> str:
     Returns:
         ray resource name string, either "GPU" or "NPU".
     """
-    return "GPU" if is_cuda_available else "NPU"
+    return "GPU" if (is_cuda_available or is_musa_available) else "NPU"
 
 
 def get_visible_devices_keyword() -> str:
     """Get the environment variable name for visible device selection.
 
     Returns the appropriate environment variable name based on the available
-    accelerator type (CUDA or Ascend NPU).
+    accelerator type (CUDA, MUSA or Ascend NPU).
 
     Returns:
-        str: 'CUDA_VISIBLE_DEVICES' if CUDA is available,
+        str: 'MUSA_VISIBLE_DEVICES' if MUSA is available,
+            'CUDA_VISIBLE_DEVICES' if CUDA is available,
             'ASCEND_RT_VISIBLE_DEVICES' otherwise.
     """
-    return "CUDA_VISIBLE_DEVICES" if not is_torch_npu_available(check_device=False) else "ASCEND_RT_VISIBLE_DEVICES"
+    # Keep MUSA behavior aligned with /home/verl: MUSA workers and rollout
+    # servers should use MUSA_VISIBLE_DEVICES as the primary visible-device
+    # coordinate system instead of CUDA_VISIBLE_DEVICES.
+    if is_musa_available:
+        return "MUSA_VISIBLE_DEVICES"
+    elif is_cuda_available:
+        return "CUDA_VISIBLE_DEVICES"
+    else:
+        return "ASCEND_RT_VISIBLE_DEVICES"
 
 
 def get_device_name() -> str:
     """Get the device type string based on available accelerators.
 
     Detects the available accelerator and returns the corresponding PyTorch
-    device type string. Currently supports CUDA, Ascend NPU, and CPU.
+    device type string. Currently supports CUDA, MUSA, Ascend NPU, and CPU.
 
     Returns:
-        str: Device type string ('cuda', 'npu', or 'cpu').
+        str: Device type string ('musa', 'cuda', 'npu', or 'cpu').
     """
-    if is_cuda_available:
+    # Keep MUSA priority aligned with /home/verl. On MUSA compatibility
+    # stacks torch.cuda.is_available() may also be true, but the primary
+    # device namespace must still be torch.musa.
+    if is_musa_available:
+        device = "musa"
+    elif is_cuda_available:
         device = "cuda"
     elif is_npu_available:
         device = "npu"
@@ -124,13 +139,15 @@ def get_nccl_backend() -> str:
     """
     if is_npu_available:
         return "hccl"
+    elif is_musa_available:
+        return "mccl"
     else:
         # default to nccl
         return "nccl"
 
 
 def set_expandable_segments(enable: bool) -> None:
-    """Configure CUDA memory allocator expandable segments setting.
+    """Configure CUDA/MUSA memory allocator expandable segments setting.
 
     Expandable segments can help avoid out-of-memory (OOM) errors by allowing
     the memory allocator to expand existing memory segments rather than
@@ -138,11 +155,11 @@ def set_expandable_segments(enable: bool) -> None:
 
     Args:
         enable: If True, enable expandable segments. If False, disable them.
-
-    Note:
-        This function only has an effect when CUDA is available.
     """
-    if is_cuda_available:
+    # Keep MUSA behavior aligned with /home/verl.
+    if is_musa_available:
+        torch.musa.memory._set_allocator_settings(f"expandable_segments:{enable}")
+    elif is_cuda_available:
         torch.cuda.memory._set_allocator_settings(f"expandable_segments:{enable}")
 
 
@@ -150,7 +167,8 @@ def auto_set_device(config) -> None:
     """Automatically configure device name for different accelerators.
 
     For example, on Ascend NPU, this function defaults the trainer device to "npu"
-    unless explicitly set to "cpu".
+    unless explicitly set to "cpu". On MUSA, align with /home/verl and set
+    trainer.device to "musa" when MUSA is available.
 
     Args:
         config: Configuration object with trainer.device attribute.
@@ -164,6 +182,8 @@ def auto_set_device(config) -> None:
                 )
 
             config.trainer.device = "npu"
+        if is_musa_available:
+            config.trainer.device = "musa"
         # Other cases: set device to "cuda" via config file, no need to change.
 
 
@@ -178,7 +198,9 @@ def get_device_capability(device_id: int = 0) -> tuple[int | None, int | None]:
             or (None, None) if CUDA is not available.
     """
     major, minor = None, None
-    if is_cuda_available:
+    if is_musa_available:
+        major, minor = torch.musa.get_device_capability(device_id)
+    elif is_cuda_available:
         major, minor = torch.cuda.get_device_capability(device_id)
 
     return major, minor

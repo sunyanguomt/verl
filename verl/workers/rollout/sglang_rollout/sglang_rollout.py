@@ -20,16 +20,62 @@ import multiprocessing as mp
 import os
 from dataclasses import asdict
 from typing import Generator
+import time
 
 import ray
-import sglang.srt.entrypoints.engine
 import torch
+
+
+def _patch_transformers_auto_image_processor_register_for_sglang():
+    """Patch transformers compatibility for sglang image processor registration.
+
+    Some sglang versions call AutoImageProcessor.register with the old
+    positional signature: (config, None, image_processor, None, exist_ok=True).
+    Newer transformers versions interpret the third/fourth positional arguments
+    differently and may raise TypeError or ValueError during sglang import.
+    """
+    try:
+        from transformers import AutoImageProcessor
+    except Exception:
+        return
+
+    original_register = AutoImageProcessor.register
+    if getattr(original_register, "_verl_sglang_compat_patched", False):
+        return
+
+    def register_compat(config_class, *args, **kwargs):
+        exist_ok = kwargs.pop("exist_ok", True)
+        try:
+            return original_register(config_class, *args, exist_ok=exist_ok, **kwargs)
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            is_sglang_old_signature = (
+                len(args) >= 3
+                and args[0] is None
+                and args[1] is not None
+                and args[2] is None
+                and (
+                    "multiple values for argument 'exist_ok'" in message
+                    or "fast_image_processor_class" in message
+                )
+            )
+            if not is_sglang_old_signature:
+                raise
+            return original_register(config_class, args[1], exist_ok=exist_ok, **kwargs)
+
+    register_compat._verl_sglang_compat_patched = True
+    AutoImageProcessor.register = register_compat
+
+
+_patch_transformers_auto_image_processor_register_for_sglang()
+import sglang.srt.entrypoints.engine
 from peft import LoraConfig
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     MultiprocessingSerializer,
     assert_pkg_version,
     is_cuda,
+    is_musa,
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
@@ -61,6 +107,13 @@ def _set_envs_and_config(server_args: ServerArgs):
     os.environ["CUDA_MODULE_LOADING"] = "AUTO"
     # Enable faulthandler in subprocesses
     os.environ["PYTHONFAULTHANDLER"] = "1"
+    # Set global environments
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["MCCL_CUMEM_ENABLE"] = "0"
+    os.environ["MCCL_NVLS_ENABLE"] = str(int(server_args.enable_nccl_nvls))
+    os.environ["TORCH_MCCL_AVOID_RECORD_STREAMS"] = "1"
+    os.environ["MUSA_DEVICE_MAX_CONNECTIONS"] = "4"
+    os.environ["MUSA_MODULE_LOADING"] = "AUTO"
 
     # Set prometheus env vars
     if server_args.enable_metrics:
@@ -76,7 +129,7 @@ def _set_envs_and_config(server_args: ServerArgs):
             "0.2.5",
             "Please uninstall the old version and reinstall the latest version by following the instructions at https://docs.flashinfer.ai/installation.html.",
         )
-    if is_cuda():
+    if is_cuda() or is_musa():
         assert_pkg_version(
             "sgl-kernel",
             "0.1.1",
@@ -339,12 +392,9 @@ class ServerAdapter(BaseRollout):
                 weights = weights
 
             async for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-                await sgl_update_weights(
-                    engine=self._engine,
-                    params_batch=params_batch,
-                    device_mesh_key="infer_tp",
-                    device_mesh=self.device_mesh,
-                )
+                await sgl_update_weights(engine=self._engine, params_batch=params_batch, device_mesh_key="infer_tp", device_mesh=self.device_mesh)
+                # Keep aligned with /home/verl: synchronize all infer TP ranks after each weight bucket.
+                torch.distributed.barrier(group=self.device_mesh["infer_tp"].get_group())
 
         if self._engine is not None and self._is_server_tp_leader():
             await self._engine.flush_cache()

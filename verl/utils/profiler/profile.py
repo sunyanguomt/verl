@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 from typing import Callable, Optional
 
 from ..memory_utils import MemorySnapshotSampler, clear_memory_history, enable_memory_visualize
@@ -115,6 +116,7 @@ class DistProfiler:
 
         # TorchMemoryProfiler currently do not support discrete mode.
         self._discrete = getattr(tool_config, "discrete", False) if tool_config else False
+        self._roles = None if config.roles is None else set(config.roles)
 
         # Lazy import to avoid circular deps
         if self._tool == "nsys":
@@ -151,6 +153,11 @@ class DistProfiler:
     def is_discrete_mode(self):
         return self._discrete
 
+    def check_this_role(self, role: Optional[str]):
+        if self._roles is None or "all" in self._roles:
+            return True
+        return role in self._roles
+
     def start(self, **kwargs):
         if self.check_enable() and self.check_this_rank():
             self._this_step = True
@@ -171,6 +178,34 @@ class DistProfiler:
         **kwargs_outer,
     ) -> Callable:
         def decorator(func):
+            if inspect.iscoroutinefunction(func):
+
+                @functools.wraps(func)
+                async def async_wrapper(self_instance, *args, **kwargs_inner):
+                    profiler = getattr(self_instance, "profiler", None)
+                    if (
+                        not profiler
+                        or not profiler.check_enable()
+                        or not profiler.check_this_step()
+                        or not profiler.check_this_rank()
+                        or not profiler.check_this_role(kwargs_outer.get("role"))
+                    ):
+                        return await func(self_instance, *args, **kwargs_inner)
+
+                    impl = profiler._impl
+                    if hasattr(impl, "annotate"):
+                        try:
+                            actual_decorator = impl.annotate(
+                                message=message, color=color, domain=domain, category=category, **kwargs_outer
+                            )
+                            decorated_func = actual_decorator(func)
+                        except Exception:
+                            return await func(self_instance, *args, **kwargs_inner)
+                        return await decorated_func(self_instance, *args, **kwargs_inner)
+                    return await func(self_instance, *args, **kwargs_inner)
+
+                return async_wrapper
+
             @functools.wraps(func)
             def wrapper(self_instance, *args, **kwargs_inner):
                 profiler = getattr(self_instance, "profiler", None)
@@ -179,6 +214,7 @@ class DistProfiler:
                     or not profiler.check_enable()
                     or not profiler.check_this_step()
                     or not profiler.check_this_rank()
+                    or not profiler.check_this_role(kwargs_outer.get("role"))
                 ):
                     return func(self_instance, *args, **kwargs_inner)
 
@@ -188,10 +224,10 @@ class DistProfiler:
                         actual_decorator = impl.annotate(
                             message=message, color=color, domain=domain, category=category, **kwargs_outer
                         )
-
-                        return actual_decorator(func)(self_instance, *args, **kwargs_inner)
+                        decorated_func = actual_decorator(func)
                     except Exception:
                         return func(self_instance, *args, **kwargs_inner)
+                    return decorated_func(self_instance, *args, **kwargs_inner)
                 return func(self_instance, *args, **kwargs_inner)
 
             return wrapper

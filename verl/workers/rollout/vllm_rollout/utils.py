@@ -61,8 +61,16 @@ def get_device_uuid(device_id: int) -> str:
             return "NPU-" + npu_visible_devices[device_id]
         else:
             return f"NPU-{device_id}"
-    else:
-        return current_platform.get_device_uuid(device_id)
+
+    if os.getenv("ACCELERATOR_BACKEND", "").lower() == "musa":
+        visible_devices = os.getenv("MUSA_VISIBLE_DEVICES") or os.getenv("CUDA_VISIBLE_DEVICES")
+        if visible_devices:
+            musa_visible_devices = [dev.strip() for dev in visible_devices.split(",") if dev.strip()]
+            if device_id < len(musa_visible_devices):
+                return "MUSA-" + musa_visible_devices[device_id]
+        return f"MUSA-{device_id}"
+
+    return current_platform.get_device_uuid(device_id)
 
 
 def get_vllm_max_lora_rank(lora_rank: int):
